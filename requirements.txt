@@ -1,0 +1,29 @@
+# Medical Conditions Worker - Requirements
+# 
+# This requirements file contains the dependencies needed for the
+# medical_conditions_worker module to process medical conditions data,
+# generate embeddings, and perform analysis tasks.
+
+# Database dependencies (shared with db service)
+alembic==1.16.5
+psycopg2-binary==2.9.10
+SQLAlchemy==2.0.43
+pgvector==0.4.1
+
+# Core machine learning and embedding libraries
+langchain-huggingface==0.1.2
+sentence-transformers==3.3.1
+torch>=2.0.0,<2.5.0
+transformers>=4.40.0,<5.0.0
+huggingface-hub>=0.24.0,<1.0.0
+
+# Note: This requirements file is optimized for the actual dependencies used
+# All processing modules (v1-v5) only use Python standard library
+# Only the embedding functionality in tasks/documents.py requires ML libraries
+#
+# For GPU support, replace the torch line above with:
+# torch>=2.0.0,<2.5.0+cu118  # For CUDA 11.8
+# torchvision>=0.15.0,<0.20.0+cu118
+# torchaudio>=2.0.0,<2.5.0+cu118
+#
+# And ensure you have CUDA drivers installed on your system.

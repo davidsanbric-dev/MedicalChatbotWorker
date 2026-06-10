@@ -1,0 +1,12 @@
+services:
+  worker:
+    build: .
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+    extra_hosts:
+      # Allows the container to reach the Postgres exposed by the
+      # medical_conditions_api stack running on the host
+      - "host.docker.internal:host-gateway"
+    # Default command shows help - override for specific tasks, e.g.:
+    #   docker compose run worker uv run python main.py --condition acne
+    command: ["uv", "run", "python", "main.py", "--help"]
