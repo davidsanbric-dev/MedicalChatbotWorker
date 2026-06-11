@@ -1,7 +1,7 @@
 [project]
 name = "medical-conditions-worker"
 version = "0.1.0"
-description = "Worker de embeddings optimizado para CPU (ONNXRuntime via light-embed)"
+description = "Worker de embeddings optimizado para CPU (ONNXRuntime via fastembed)"
 readme = "README.md"
 requires-python = ">=3.12"
 
@@ -13,12 +13,8 @@ dependencies = [
     "sqlalchemy==2.0.43",
     
     # Embeddings ligeros con ONNX
-    "light-embed>=1.0.8",  # Versión aproximada; actualiza con la última de PyPI
-
     "fastembed==0.7.3",
-    
-    # Utilidades numéricas (opcional, light-embed usa numpy internamente)
-    
+
     # Opcional: para progreso en batch
     "tqdm>=4.66.0"
 ]

@@ -8,7 +8,7 @@ Key Class:
 - DocumentService: Contains methods for document processing tasks
 
 Dependencies:
-- light_embed: For fast ONNX-based embedding generation
+- fastembed: For fast ONNX-based embedding generation
 - Database service for PostgreSQL operations
 
 Note: This module works with pre-processed data stored in the database.
@@ -19,7 +19,6 @@ from typing import Optional
 
 from repositories import processed_data_repository, document_repository
 from utils import show_progress_spinner
-# from light_embed import TextEmbedding
 from fastembed import TextEmbedding
 
 # Note: SessionLocal import removed as repositories handle session management
