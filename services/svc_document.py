@@ -23,6 +23,12 @@ from fastembed import TextEmbedding
 
 # Note: SessionLocal import removed as repositories handle session management
 
+# Embedding model shared with the API. Must stay identical to the API's query
+# model (medical_conditions_api/app/core/embedding.py): the corpus is embedded
+# here with passage_embed() and queried there with query_embed(), so both sides
+# must use the same model or vector distances are meaningless.
+DEFAULT_EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
+
 class DocumentService:
 
     _cached_embedding_model: Optional[TextEmbedding] = None
@@ -33,7 +39,7 @@ class DocumentService:
     def _get_embedding_model(
         cls,
         embedding_model: Optional[TextEmbedding] = None,
-        model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
+        model_name: str = DEFAULT_EMBEDDING_MODEL,
     ) -> TextEmbedding:
         """Return a ready embedding model, lazily initializing and caching it."""
         if embedding_model is not None:
@@ -56,7 +62,7 @@ class DocumentService:
         processed_data_id,
         embedding_model: Optional[TextEmbedding] = None,
         content_types=None,
-        model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
+        model_name: str = DEFAULT_EMBEDDING_MODEL,
     ):
         """
         Generate embeddings from a ProcessedData record and save to Document table.
@@ -213,7 +219,7 @@ class DocumentService:
             return {"created": 0, "errors": 1}
 
     @staticmethod
-    def initialize_embedding_model(model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
+    def initialize_embedding_model(model_name: str = DEFAULT_EMBEDDING_MODEL):
         """
         Initializes the embedding model with a visual progress bar.
 

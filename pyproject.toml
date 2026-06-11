@@ -12,7 +12,7 @@ dependencies = [
     "sqlalchemy==2.0.43",
 
     # Embeddings ligeros con ONNX
-    "fastembed==0.7.3",
+    "fastembed==0.8.0",
 ]
 
 [build-system]
