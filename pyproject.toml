@@ -7,16 +7,12 @@ requires-python = ">=3.12"
 
 dependencies = [
     # Base de datos
-    "alembic==1.16.5",
     "pgvector==0.4.1",
     "psycopg2-binary==2.9.10",
     "sqlalchemy==2.0.43",
-    
+
     # Embeddings ligeros con ONNX
     "fastembed==0.7.3",
-
-    # Opcional: para progreso en batch
-    "tqdm>=4.66.0"
 ]
 
 [build-system]
