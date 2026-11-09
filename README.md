@@ -14,7 +14,7 @@ The worker is part of a **3-stage ETL pipeline architecture**:
 PostgreSQL Database Pipeline:
 ├── raw_data              # Stage 1: Raw scraped JSON from Medical
 │   └── [Scraper writes here]
-├── processed_data        # Stage 2: Cleaned, structured data (v5 processor)
+├── processed_data        # Stage 2: Cleaned, structured data (processor v6)
 │   └── [Worker processes from raw_data]
 └── documents             # Stage 3: Text chunks with vector embeddings
     └── [Worker generates embeddings from processed_data]
@@ -23,16 +23,16 @@ PostgreSQL Database Pipeline:
 ## 🚀 Features
 
 ### Database-Driven Processing
-- **RawData → ProcessedData**: Transforms raw JSON into structured, cleaned data using v5 processor
+- **RawData → ProcessedData**: Transforms raw JSON into structured, cleaned, Unicode-normalized data (processor `v6`)
 - **Automatic Discovery**: Lists available conditions directly from `raw_data` table
-- **Duplicate Prevention**: Checks for existing processed data before processing
+- **Versioned & Idempotent**: Raw records already processed by the current processor version are skipped; output of an older version is replaced (with its documents) in one transaction
 - **Condition Filtering**: Process all conditions or target specific ones
 
 ### Embedding Generation
 - **ProcessedData → Documents**: Generates vector embeddings for all processed content
-- **Multi-Type Embeddings**: Supports symptoms, paragraphs, and list items
-- **Automatic Chunking**: Intelligently splits content into searchable chunks
-- **HuggingFace Integration**: Uses `sentence-transformers/all-MiniLM-L6-v2` (384 dimensions)
+- **Structure-Aware Chunking**: One chunk for the symptom list, one per paragraph and one per list; nested lists are rendered as readable indented bullets (`services/chunking.py`, unit-tested)
+- **Idempotent**: Records that already have documents are skipped; `--reembed` replaces a record's documents atomically
+- **fastembed (ONNX, CPU)**: `BAAI/bge-small-en-v1.5` (384 dimensions), the same model the API uses for queries
 - **Lazy Model Loading**: Caches embedding model for performance
 
 ### Service Architecture
@@ -107,6 +107,13 @@ python main.py
 
 # Docker
 docker compose run --rm worker python main.py
+```
+
+#### Re-embed After Changing Chunking or the Embedding Model
+```bash
+# Replace existing documents instead of skipping already-embedded records
+python main.py --reembed
+python main.py --reembed --condition Acne
 ```
 
 #### Process Specific Condition
@@ -202,12 +209,12 @@ documents = document_repository.find_by_processed_data_id(processed_data.id)
 
 2. Data Processing (Worker - ProcessedDataService)
    ├─→ Read from raw_data table
-   ├─→ Apply v5 processor (clean, structure, deduplicate)
+   ├─→ Apply the v6 processor (normalize, clean, structure, deduplicate)
    └─→ processed_data table (PostgreSQL)
        ├─ id: UUID
        ├─ raw_data_id: UUID (foreign key)
        ├─ content: JSONB (structured data)
-       ├─ processor_version: VARCHAR ("v5")
+       ├─ processor_version: VARCHAR ("v6")
        ├─ condition_name: VARCHAR
        ├─ processing_metadata: JSONB
        └─ created_at: TIMESTAMP
@@ -215,7 +222,7 @@ documents = document_repository.find_by_processed_data_id(processed_data.id)
 3. Embedding Generation (Worker - DocumentService)
    ├─→ Read from processed_data table
    ├─→ Chunk content (symptoms, paragraphs, lists)
-   ├─→ Generate embeddings (sentence-transformers)
+   ├─→ Generate embeddings (fastembed, bge-small-en-v1.5)
    └─→ documents table (PostgreSQL + pgvector)
        ├─ id: UUID
        ├─ processed_data_id: UUID (foreign key)
@@ -235,8 +242,12 @@ documents = document_repository.find_by_processed_data_id(processed_data.id)
 
 ### Processing Version
 
-Currently uses **v5 processor** exclusively:
-- Title normalization and condition name extraction
+`PROCESSOR_VERSION` in `services/svc_processed_data.py` is currently **v6**. Bump it whenever the
+processed output changes: on the next run every raw record processed by an older version is
+re-processed, and its old `processed_data` row and documents are replaced in one transaction.
+
+- **v6**: Unicode normalization (NFKC), so non-breaking spaces become plain spaces
+- **v5**: title normalization and condition name extraction
 - Nested list deduplication
 - Paragraph and content item processing
 - Metadata extraction and cleaning
@@ -245,8 +256,8 @@ Currently uses **v5 processor** exclusively:
 ### Embedding Configuration
 
 ```python
-# Default embedding model
-MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+# Default embedding model (must match medical_conditions_api/app/core/embedding.py)
+DEFAULT_EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
 EMBEDDING_DIMENSION = 384
 
 # Supported content types
@@ -360,12 +371,22 @@ docker compose run --rm scraper python main.py --all --database
 docker compose exec postgres psql -U postgres -d medical_conditions_db -c "SELECT COUNT(*) FROM raw_data;"
 ```
 
-#### Duplicate Prevention
+#### Re-running and Reprocessing
 ```bash
-# The worker automatically skips already-processed conditions
-# To reprocess, manually delete from processed_data table:
-docker compose exec postgres psql -U postgres -d medical_conditions_db
-# DELETE FROM processed_data WHERE condition_name = 'acne';
+# Re-running is safe: processed records at the current version and
+# already-embedded records are skipped, so nothing is duplicated.
+python main.py
+
+# Rebuild the documents (e.g. after changing chunking rules or the model)
+python main.py --reembed
+
+# Reprocess everything: bump PROCESSOR_VERSION, then run normally
+```
+
+## 🧪 Tests
+
+```bash
+uv run pytest        # chunking and normalization rules (no database needed)
 ```
 
 ## 📈 Performance Considerations

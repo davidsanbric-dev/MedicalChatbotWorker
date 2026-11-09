@@ -284,3 +284,6 @@ def print_processing_summary(stats):
     print(f"   ✅ Successful: {stats['successful']}")
     print(f"   ❌ Failed: {stats['failed']}")
     print(f"   ⏭️  Skipped: {stats['skipped']}")
+    if stats.get("replaced"):
+        print(f"   ♻️  Replaced older processor output: {stats['replaced']}")
+    return stats

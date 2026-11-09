@@ -8,7 +8,7 @@ accessing processed medical condition data.
 
 from typing import Optional
 
-from db.models import ProcessedData, RawData
+from db.models import Document, ProcessedData, RawData
 from db.database import SessionLocal
 
 
@@ -119,7 +119,64 @@ class ProcessedDataRepository:
         finally:
             session.close()
 
-    def save(self, content, condition_name: str, processor_version: str = "v5", 
+    def find_versions_by_raw_data_id(self, raw_data_id: str) -> list[str]:
+        """Return the processor versions already stored for a RawData record."""
+        session = SessionLocal()
+        try:
+            rows = session.query(ProcessedData.processor_version).filter(
+                ProcessedData.raw_data_id == raw_data_id
+            ).all()
+            return [version for (version,) in rows]
+        finally:
+            session.close()
+
+    def replace_for_raw_data_id(self, raw_data_id: str, content, condition_name: str,
+                                processor_version: str, processing_metadata=None) -> str:
+        """Atomically replace the processed output of one RawData record.
+
+        Older processor outputs for the same raw record are deleted together
+        with their documents (their embeddings were built from stale text), and
+        the new record is inserted, all in one transaction. This keeps exactly
+        one ProcessedData row per raw record, which is what the API's insight
+        queries assume.
+
+        Returns:
+            str: UUID of the new ProcessedData record
+        """
+        session = SessionLocal()
+        try:
+            old_ids = [
+                pid for (pid,) in session.query(ProcessedData.id).filter(
+                    ProcessedData.raw_data_id == raw_data_id
+                ).all()
+            ]
+            if old_ids:
+                session.query(Document).filter(
+                    Document.processed_data_id.in_(old_ids)
+                ).delete(synchronize_session=False)
+                session.query(ProcessedData).filter(
+                    ProcessedData.id.in_(old_ids)
+                ).delete(synchronize_session=False)
+
+            processed_data = ProcessedData(
+                raw_data_id=raw_data_id,
+                content=content,
+                processor_version=processor_version,
+                condition_name=condition_name,
+                processing_metadata=processing_metadata or {},
+            )
+            session.add(processed_data)
+            session.flush()
+            processed_data_id = str(processed_data.id)
+            session.commit()
+            return processed_data_id
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def save(self, content, condition_name: str, processor_version: str = "v6", 
               raw_data_id=None, processing_metadata=None):
         """
         Save a new ProcessedData record to the database.

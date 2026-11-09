@@ -1,7 +1,14 @@
 import time
 from typing import Any, Dict, Optional
 from repositories import processed_data_repository, raw_data_repository
+from services.chunking import normalize_content, normalize_text
 from utils import deduplicate_lists, print_processing_summary
+
+# Bump whenever the processed output changes, so stored records from an older
+# processor are replaced on the next run instead of being kept as they are.
+#   v5: restructure, merge and deduplicate
+#   v6: + Unicode normalization (NFKC: non-breaking spaces become plain spaces)
+PROCESSOR_VERSION = "v6"
 
 class ProcessedDataService:
     def __init__(self):
@@ -63,16 +70,16 @@ class ProcessedDataService:
         
         return condition_name
 
-    def create(self, processed_content, condition_name, processor_version="v5", raw_data_id=None, processing_metadata=None):
+    def create(self, processed_content, condition_name, processor_version=PROCESSOR_VERSION, raw_data_id=None, processing_metadata=None):
         """
         Create a new entry in the ProcessedDfor prefix in prefixes_to_remove:
             if cleaned_lower.startswith(prefix):
                 cleaned_title = cleaned_title[]ata table.
 
         Args:
-            processed_content: The processed JSON content from process_v5.py
+            processed_content: The processed JSON content
             condition_name: Name of the condition (e.g., "acne", "diabetes")
-            processor_version: Version of the processor used (default: "v5")
+            processor_version: Version of the processor used (default: PROCESSOR_VERSION)
             raw_data_id: UUID of the source RawData record (optional)
             processing_metadata: Additional metadata about the processing (optional)
 
@@ -125,57 +132,57 @@ class ProcessedDataService:
             print("❌ No RawData records found for processing")
             return {"processed": 0, "successful": 0, "failed": 0, "skipped": 0}
 
-        stats = {"processed": 0, "successful": 0, "failed": 0, "skipped": 0}
-        
+        stats = {"processed": 0, "successful": 0, "failed": 0, "skipped": 0, "replaced": 0}
+
         for raw_data_id, source, raw_content in raw_data_records:
             # Extract condition name from the title property in raw_content
             # Fall back to extracting from source if title is not available
             if isinstance(raw_content, dict) and "title" in raw_content:
-                condition_name = self.extract_condition_name_from_title(raw_content["title"])
+                condition_name = normalize_text(self.extract_condition_name_from_title(raw_content["title"]))
             else:
                 # Fallback: Extract condition name from source (format: medical_conditions:condition-name)
                 condition_name = source.replace("medical_conditions:", "").replace("-", "_")
-            
+
             # Apply condition filter if specified (case-insensitive comparison)
             if condition_filter and condition_name.lower() != condition_filter.lower():
                 continue
-            
+
             stats["processed"] += 1
-            
-            # Check if already processed
-            if processed_data_repository and processed_data_repository.exists_for_condition_name_and_processor_version(condition_name, "v5"):
-                print(f"⏭️  Skipping {condition_name} (already processed)")
+
+            # Idempotency is keyed on the raw record: the current processor
+            # version is skipped, an older one is replaced (with its documents).
+            existing_versions = processed_data_repository.find_versions_by_raw_data_id(raw_data_id)
+            if PROCESSOR_VERSION in existing_versions:
+                print(f"⏭️  Skipping {condition_name} (already processed with {PROCESSOR_VERSION})")
                 stats["skipped"] += 1
                 continue
-            
+
             try:
-                # Process the raw data
-                processed_data = self.process_condition_data(raw_content)
-                
-                # Prepare processing metadata
+                processed_data = normalize_content(self.process_condition_data(raw_content))
+
                 processing_metadata = {
                     "source": "raw_data_table",
                     "raw_data_id": raw_data_id,
-                    "processor": "process_v5",
+                    "processor": f"process_{PROCESSOR_VERSION}",
+                    "replaced_versions": existing_versions,
                     "processed_at": time.time()
                 }
-                
-                # Save to ProcessedData table
-                processed_data_id = self.create(
-                    processed_content=processed_data,
-                    condition_name=condition_name,
-                    processor_version="v5",
+
+                processed_data_id = processed_data_repository.replace_for_raw_data_id(
                     raw_data_id=raw_data_id,
-                    processing_metadata=processing_metadata
+                    content=processed_data,
+                    condition_name=condition_name,
+                    processor_version=PROCESSOR_VERSION,
+                    processing_metadata=processing_metadata,
                 )
-                
-                if processed_data_id:
-                    stats["successful"] += 1
-                    print(f"✅ {condition_name}: Processed from RawData (ID: {processed_data_id})")
+
+                stats["successful"] += 1
+                if existing_versions:
+                    stats["replaced"] += 1
+                    print(f"♻️  {condition_name}: {', '.join(existing_versions)} → {PROCESSOR_VERSION} (ID: {processed_data_id})")
                 else:
-                    stats["failed"] += 1
-                    print(f"❌ {condition_name}: Failed to save ProcessedData")
-                
+                    print(f"✅ {condition_name}: Processed from RawData (ID: {processed_data_id})")
+
             except Exception as e:
                 stats["failed"] += 1
                 print(f"❌ {condition_name}: Processing error - {e}")

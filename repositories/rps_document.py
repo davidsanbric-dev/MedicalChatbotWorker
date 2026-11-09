@@ -74,6 +74,51 @@ class DocumentRepository:
         finally:
             db_session.close()
 
+    def exists_for_processed_data_id(self, processed_data_id: str) -> bool:
+        """Return True if any Document already belongs to this ProcessedData record."""
+        db_session = SessionLocal()
+        try:
+            return db_session.query(
+                db_session.query(Document.id)
+                .filter(Document.processed_data_id == processed_data_id)
+                .exists()
+            ).scalar()
+        finally:
+            db_session.close()
+
+    def replace_for_processed_data_id(self, processed_data_id: str, rows: list[dict]) -> int:
+        """Atomically replace every Document of a ProcessedData record.
+
+        Deletes the record's existing documents and inserts `rows` (dicts with
+        content, content_type, embedding, metadata) in one transaction, so a
+        re-run can never leave duplicates or a half-embedded record behind.
+
+        Returns:
+            int: Number of documents inserted
+        """
+        db_session = SessionLocal()
+        try:
+            db_session.query(Document).filter(
+                Document.processed_data_id == processed_data_id
+            ).delete(synchronize_session=False)
+            db_session.add_all(
+                Document(
+                    processed_data_id=processed_data_id,
+                    content=row["content"],
+                    content_type=row["content_type"],
+                    embedding=row["embedding"],
+                    metadata_=row.get("metadata") or {},
+                )
+                for row in rows
+            )
+            db_session.commit()
+            return len(rows)
+        except Exception:
+            db_session.rollback()
+            raise
+        finally:
+            db_session.close()
+
     def find_by_content_type(self, content_type: str):
         """
         Find all Document records of a specific content type.

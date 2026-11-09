@@ -38,6 +38,12 @@ def main():
         action="store_true",
         help="List all available conditions stored in the RawData table"
     )
+    parser.add_argument(
+        "--reembed",
+        action="store_true",
+        help="Replace existing documents instead of skipping already-embedded records "
+             "(use after changing the chunking rules or the embedding model)"
+    )
     
     args, unknown = parser.parse_known_args()
     
@@ -67,25 +73,39 @@ def main():
     
     try:
 
-        # Process from RawData table
-        # print("🔄 Processing data from RawData table to ProcessedData table using v5...")
+        # Phase 1: raw_data -> processed_data (skips records already at the
+        # current processor version, replaces older ones).
         condition_filter = args.condition or condition_name
         processed_data_service.process_from_raw_data(condition_filter)
 
-        # Now generate embeddings from the processed data
+        # Phase 2: processed_data -> documents (skips records that already
+        # have documents unless --reembed is given).
         print("\n🔄 Generating embeddings from ProcessedData table...")
-
-        # Get all ProcessedData records
         processed_data_records = processed_data_repository.find_all()
+        if condition_filter:
+            processed_data_records = [
+                r for r in processed_data_records
+                if r.condition_name.lower() == condition_filter.lower()
+            ]
 
         if not processed_data_records:
             print("❌ No ProcessedData records found for embedding generation.")
             return
-        print(f"Found {len(processed_data_records)} ProcessedData records to process for embeddings...")
 
+        totals = {"created": 0, "errors": 0, "skipped": 0}
         for record in processed_data_records:
-            # print(f"\n🔄 Generating embeddings for {record.condition_name} (ID: {record.id})...")
-            document_service.generate_embeddings_from_processed_data(str(record.id))
+            result = document_service.generate_embeddings_from_processed_data(
+                str(record.id), reembed=args.reembed
+            )
+            for key in totals:
+                totals[key] += result.get(key, 0)
+
+        print("\n📊 Embedding summary:")
+        print(f"   🧩 Documents created: {totals['created']}")
+        print(f"   ⏭️  Records already embedded (skipped): {totals['skipped']}")
+        print(f"   ❌ Errors: {totals['errors']}")
+        if totals["errors"]:
+            sys.exit(1)
 
     except ImportError as e:
         print(f"Error: Could not import required modules: {e}")

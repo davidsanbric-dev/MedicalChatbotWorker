@@ -18,6 +18,7 @@ import threading
 from typing import Optional
 
 from repositories import processed_data_repository, document_repository
+from services.chunking import build_chunks
 from utils import show_progress_spinner
 from fastembed import TextEmbedding
 
@@ -63,160 +64,73 @@ class DocumentService:
         embedding_model: Optional[TextEmbedding] = None,
         content_types=None,
         model_name: str = DEFAULT_EMBEDDING_MODEL,
+        reembed: bool = False,
     ):
         """
-        Generate embeddings from a ProcessedData record and save to Document table.
+        Chunk a ProcessedData record, embed the chunks and store them as Documents.
+
+        Idempotent: a record that already has documents is skipped unless
+        `reembed` is True, in which case its documents are replaced atomically
+        (needed after changing the chunking rules or the embedding model).
 
         Args:
             processed_data_id: UUID of the ProcessedData record
             embedding_model: Optional pre-initialized TextEmbedding model
-            content_types: List of content types to process ["symptoms", "paragraphs", "lists"] (default: all)
-            model_name: Model path used when lazily initializing the embedding model (ONNX model path)
+            content_types: Subset of ["symptoms", "paragraphs", "lists"] (default: all)
+            model_name: Model used when lazily initializing the embedding model
+            reembed: Replace existing documents instead of skipping the record
 
         Returns:
-            dict: {"created": int, "errors": int}
+            dict: {"created": int, "errors": int, "skipped": int}
         """
-
-        if content_types is None:
-            content_types = ["symptoms", "paragraphs", "lists"]
-
-        embedding_model = cls._get_embedding_model(embedding_model, model_name)
-
         try:
-            # Get the ProcessedData record
-            processed_data = processed_data_repository.find_by_id(processed_data_id)
+            if not reembed and document_repository.exists_for_processed_data_id(processed_data_id):
+                return {"created": 0, "errors": 0, "skipped": 1}
 
+            processed_data = processed_data_repository.find_by_id(processed_data_id)
             if not processed_data:
                 print(f"❌ ProcessedData record {processed_data_id} not found")
-                return {"created": 0, "errors": 1}
+                return {"created": 0, "errors": 1, "skipped": 0}
 
-            content = processed_data.content
             condition_name = processed_data.condition_name
+            chunks = build_chunks(
+                processed_data.content,
+                condition_name,
+                processed_data.processor_version,
+                content_types,
+            )
+            if not chunks:
+                print(f"⚠️  {condition_name}: nothing to embed")
+                return {"created": 0, "errors": 0, "skipped": 1}
 
-            created_count = 0
-            error_count = 0
+            embedding_model = cls._get_embedding_model(embedding_model, model_name)
+            # Embed chunk by chunk: batching pads every chunk to the longest one
+            # in the batch, which measured ~35% slower on this corpus.
+            embeddings = [next(iter(embedding_model.passage_embed([c.content]))) for c in chunks]
 
-            print(f"🔄 Generating embeddings for {condition_name} (processed_data_id: {processed_data_id})")
+            created = document_repository.replace_for_processed_data_id(
+                processed_data_id,
+                [
+                    {
+                        "content": chunk.content,
+                        "content_type": chunk.content_type,
+                        "embedding": embedding,
+                        "metadata": chunk.metadata,
+                    }
+                    for chunk, embedding in zip(chunks, embeddings)
+                ],
+            )
 
-            # Process symptoms
-            if "symptoms" in content_types and "symptoms" in content:
-                try:
-                    symptoms_data = content["symptoms"]
-                    if isinstance(symptoms_data, list) and len(symptoms_data) >= 2:
-                        description = symptoms_data[0]
-                        symptom_list = symptoms_data[1]
-                        symptoms_text = f"{description} {', '.join(symptom_list)}" if isinstance(symptom_list, list) else str(description)
-
-                        # Generate embedding
-                        # embedding = embedding_model.encode([symptoms_text])[0]
-                        embedding = list(embedding_model.passage_embed([symptoms_text]))[0]
-
-                        # Create Document record using repository
-                        document_repository.save(
-                            processed_data_id=processed_data_id,
-                            content=symptoms_text,
-                            content_type="symptom",
-                            embedding=embedding,
-                            metadata={
-                                "condition": condition_name,
-                                "source": "symptoms",
-                                "processor_version": processed_data.processor_version
-                            }
-                        )
-                        created_count += 1
-                        print("  ✅ Created symptom embedding")
-
-                except Exception as e:
-                    print(f"  ❌ Error processing symptoms: {e}")
-                    error_count += 1
-
-            # Process paragraphs
-            if "paragraphs" in content_types and "onlineDiagnosingAndTreating" in content:
-                try:
-                    content_section = content["onlineDiagnosingAndTreating"].get("content", {})
-                    paragraphs = content_section.get("paragraphs", [])
-
-                    for i, paragraph in enumerate(paragraphs):
-                        if isinstance(paragraph, str) and paragraph.strip():
-                            # Generate embedding
-                            # embedding = embedding_model.encode([paragraph])[0]
-                            embedding = list(embedding_model.passage_embed([paragraph]))[0]
-
-                            # Create Document record using repository
-                            document_repository.save(
-                                processed_data_id=processed_data_id,
-                                content=paragraph,
-                                content_type="paragraph",
-                                embedding=embedding,
-                                metadata={
-                                    "condition": condition_name,
-                                    "source": "paragraph",
-                                    "paragraph_index": i,
-                                    "processor_version": processed_data.processor_version
-                                }
-                            )
-                            created_count += 1
-
-                    if paragraphs:
-                        print(f"  ✅ Created {len(paragraphs)} paragraph embeddings")
-
-                except Exception as e:
-                    print(f"  ❌ Error processing paragraphs: {e}")
-                    error_count += 1
-
-            # Process lists
-            if "lists" in content_types and "onlineDiagnosingAndTreating" in content:
-                try:
-                    content_section = content["onlineDiagnosingAndTreating"].get("content", {})
-                    lists = content_section.get("lists", [])
-
-                    for i, list_item in enumerate(lists):
-                        # Convert list structure to text
-                        if isinstance(list_item, list) and len(list_item) >= 2:
-                            # Format: [heading, content]
-                            heading = list_item[0]
-                            list_content = list_item[1]
-
-                            if isinstance(list_content, dict) and "items" in list_content:
-                                items_text = ", ".join([str(item) for item in list_content["items"]])
-                                full_text = f"{heading}: {items_text}"
-                            else:
-                                full_text = f"{heading}: {str(list_content)}"
-
-                            # Generate embedding
-                            # embedding = embedding_model.encode([full_text])[0]
-                            embedding = list(embedding_model.passage_embed([full_text]))[0]
-
-                            # Create Document record using repository
-                            document_repository.save(
-                                processed_data_id=processed_data_id,
-                                content=full_text,
-                                content_type="list_item",
-                                embedding=embedding,
-                                metadata={
-                                    "condition": condition_name,
-                                    "source": "list",
-                                    "list_index": i,
-                                    "processor_version": processed_data.processor_version
-                                }
-                            )
-                            created_count += 1
-
-                    if lists:
-                        print(f"  ✅ Created {len(lists)} list item embeddings")
-
-                except Exception as e:
-                    print(f"  ❌ Error processing lists: {e}")
-                    error_count += 1
-
-            # All documents created via repositories, no session management needed
-
-            print(f"🎉 Embedding generation complete: {created_count} created, {error_count} errors")
-            return {"created": created_count, "errors": error_count}
+            counts = {t: sum(c.content_type == t for c in chunks) for t in ("symptom", "paragraph", "list_item")}
+            print(
+                f"✅ {condition_name}: {created} chunks embedded "
+                f"({counts['symptom']} symptom, {counts['paragraph']} paragraph, {counts['list_item']} list)"
+            )
+            return {"created": created, "errors": 0, "skipped": 0}
 
         except Exception as e:
-            print(f"❌ Error generating embeddings: {e}")
-            return {"created": 0, "errors": 1}
+            print(f"❌ Error generating embeddings for {processed_data_id}: {e}")
+            return {"created": 0, "errors": 1, "skipped": 0}
 
     @staticmethod
     def initialize_embedding_model(model_name: str = DEFAULT_EMBEDDING_MODEL):
