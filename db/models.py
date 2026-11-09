@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Text, TIMESTAMP, UUID, ForeignKey, Index, DDL, event
+from sqlalchemy import Column, String, Text, TIMESTAMP, UUID, ForeignKey, Index
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
@@ -53,7 +53,12 @@ class Document(Base):
     processed_data = relationship("ProcessedData", back_populates="documents")
 
     __table_args__ = (
-        Index('documents_embedding_idx', 'embedding', postgresql_using='ivfflat', postgresql_ops={'vector_cosine_ops'}, postgresql_with={'lists': 100}),
+        Index(
+            'documents_embedding_idx',
+            'embedding',
+            postgresql_using='hnsw',
+            postgresql_ops={'embedding': 'vector_cosine_ops'},
+        ),
     )
 
     def __repr__(self):
@@ -70,23 +75,6 @@ class ChatHistory(Base):
     def __repr__(self):
         return f"<ChatHistory(session_id={self.session_id}, updated_at={self.updated_at})>"
 
-# DDL for PostgreSQL-specific features
-ddl_vector_extension = DDL("CREATE EXTENSION IF NOT EXISTS vector;")
-event.listen(Base.metadata, 'after_create', ddl_vector_extension.execute_if(dialect='postgresql'))
-
-ddl_search_function = DDL("""
-CREATE OR REPLACE FUNCTION search_similar_documents(query_embedding vector(384), top_k integer)
-RETURNS TABLE(id uuid, content text, metadata_ jsonb, similarity_score float)
-LANGUAGE sql STABLE
-AS $$
-    SELECT
-        d.id,
-        d.content,
-        d.metadata_,
-        1 - (d.embedding <-> query_embedding) AS similarity_score
-    FROM documents d
-    ORDER BY d.embedding <-> query_embedding
-    LIMIT top_k;
-$$;
-""")
-event.listen(Base.metadata, 'after_create', ddl_search_function.execute_if(dialect='postgresql'))
+# Mirror of medical_conditions_api/app/core/models.py, which owns the schema:
+# the API creates the vector extension, the tables and the HNSW index at
+# startup. Keep the index definition here in sync with it.

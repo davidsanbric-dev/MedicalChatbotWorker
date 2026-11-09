@@ -415,7 +415,7 @@ uv run pytest        # chunking and normalization rules (no database needed)
 - **Parallel Processing**: Process different conditions in separate containers
 
 ### Database Indexing
-- **pgvector IVFFlat**: Optimized vector similarity search with lists=100
+- **pgvector HNSW (cosine)**: Created by the API at startup. Unlike ivfflat it needs no rebuild after the worker loads embeddings. At the current size Postgres still prefers an exact scan.
 - **Foreign Keys**: Indexed relationships between tables
 - **UUID Primary Keys**: Fast lookups and relationships
 
