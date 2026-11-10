@@ -1,121 +1,56 @@
-#!/usr/bin/env python3
-"""
-Medical Conditions Worker — database-driven processing for Medical condition content.
+"""Worker CLI: station 2 of the medical chatbot pipeline.
 
-This module coordinates the processing pipeline: it promotes records from the
-`RawData` table into structured `ProcessedData` entries and then creates
-embeddings for downstream search from the resulting documents.
-
-Key capabilities:
-- Run the processor for every condition or a single condition with `--condition`.
-- Discover available conditions directly from the `RawData` table via `--list-conditions`.
-- Generate embeddings for each processed condition to populate the `documents` table.
-
-Supporting assets live under:
-- `services/` - business logic for processing and embedding generation.
-- `repositories/` - database access layers for `RawData`, `ProcessedData`.
+Turns the scraper's raw pages into clean records, cuts them into passages and
+embeds every passage for search. How it works, visually:
+https://medicalchatbot.demos.davieldev.com/worker
 """
 
 import argparse
 import sys
-from services import DocumentService, ProcessedDataService
-from repositories import processed_data_repository, raw_data_repository
-document_service = DocumentService()
-processed_data_service = ProcessedDataService()
 
-def main():
-    """Main function to handle command line arguments and dispatch to processing modules."""
-    parser = argparse.ArgumentParser(
-        description="Medical Conditions Worker - Process medical conditions data and generate embeddings"
-    )
+from pipeline import embed_records, name_of, process_pages, select_pages
+from repositories.raw_data import slug_of
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Process the scraped pages and embed them for search.")
     parser.add_argument(
         "--condition",
-        type=str,
-        help="Process specific condition by name (e.g., 'allergies', 'acid-reflux-gerd')"
+        metavar="NAME",
+        help="only this condition, by page slug or by name (e.g. acid-reflux-gerd or 'Acid reflux & GERD')",
     )
-    parser.add_argument(
-        "--list-conditions",
-        action="store_true",
-        help="List all available conditions stored in the RawData table"
-    )
+    parser.add_argument("--list-conditions", action="store_true", help="list the scraped conditions and exit")
     parser.add_argument(
         "--reembed",
         action="store_true",
-        help="Replace existing documents instead of skipping already-embedded records "
-             "(use after changing the chunking rules or the embedding model)"
+        help="rebuild documents that already exist (after changing the chunking rules or the embedding model)",
     )
-    
-    args, unknown = parser.parse_known_args()
-    
-    # Extract condition name from unknown args (flags like --depression)
-    condition_name = None
-    for arg in unknown:
-        if arg.startswith('--'):
-            condition_name = arg[2:]  # Remove the -- prefix
-            break
-    
-    # List available conditions if requested
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    pages = select_pages(args.condition)
     if args.list_conditions:
-        if raw_data_repository is None:
-            print("Error: RawData repository not available. Cannot list conditions from database.")
-            sys.exit(1)
+        print("Scraped conditions (--condition takes either column):")
+        for page in pages:
+            print(f"  {slug_of(page):<34} {name_of(page)}")
+        return 0
+    if not pages:
+        print(f"❌ No scraped page matches '{args.condition}'. See --list-conditions." if args.condition
+              else "❌ raw_data has no pages yet: run the scraper first.")
+        return 1
 
-        condition_names = raw_data_repository.list_condition_names()
+    processing = process_pages(pages)
+    embedding = embed_records(pages, reembed=args.reembed)
 
-        if not condition_names:
-            print("❌ No conditions found in RawData table.")
-            return
-
-        print("Available conditions (from RawData table):")
-        for condition in condition_names:
-            print(f"  - {condition}")
-        return
-    
-    try:
-
-        # Phase 1: raw_data -> processed_data (skips records already at the
-        # current processor version, replaces older ones).
-        condition_filter = args.condition or condition_name
-        processed_data_service.process_from_raw_data(condition_filter)
-
-        # Phase 2: processed_data -> documents (skips records that already
-        # have documents unless --reembed is given).
-        print("\n🔄 Generating embeddings from ProcessedData table...")
-        processed_data_records = processed_data_repository.find_all()
-        if condition_filter:
-            processed_data_records = [
-                r for r in processed_data_records
-                if r.condition_name.lower() == condition_filter.lower()
-            ]
-
-        if not processed_data_records:
-            print("❌ No ProcessedData records found for embedding generation.")
-            return
-
-        totals = {"created": 0, "errors": 0, "skipped": 0}
-        for record in processed_data_records:
-            result = document_service.generate_embeddings_from_processed_data(
-                str(record.id), reembed=args.reembed
-            )
-            for key in totals:
-                totals[key] += result.get(key, 0)
-
-        print("\n📊 Embedding summary:")
-        print(f"   🧩 Documents created: {totals['created']}")
-        print(f"   ⏭️  Records already embedded (skipped): {totals['skipped']}")
-        print(f"   ❌ Errors: {totals['errors']}")
-        if totals["errors"]:
-            sys.exit(1)
-
-    except ImportError as e:
-        print(f"Error: Could not import required modules: {e}")
-        sys.exit(1)
-    except Exception as e:
-        print(f"Error during processing: {e}")
-        sys.exit(1)
-    
-    print("\n🎉 Processing completed successfully!")
+    print("\n📊 Summary")
+    print(f"   processed_data: {processing['processed']} new, {processing['replaced']} replaced, "
+          f"{processing['skipped']} already current, {processing['failed']} failed")
+    print(f"   documents:      {embedding['created']} created, {embedding['skipped']} records skipped, "
+          f"{embedding['errors']} errors")
+    return 1 if processing["failed"] or embedding["errors"] else 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

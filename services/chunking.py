@@ -1,68 +1,58 @@
-"""
-Pure text helpers for the worker: text normalization and chunk building.
+"""Cut a clean record into passages: step 2 on https://medicalchatbot.demos.davieldev.com/worker
 
-Nothing here touches the database or the embedding model, so the exact text
-that gets embedded can be unit-tested (see tests/test_chunking.py).
+One passage for the symptom list, one per paragraph and one per list, following
+the page's own structure instead of a fixed token window. Passage counts and
+lengths are in the "Chunk stats" tab (#chunks); the "Audit & fixes" tab (#fixes)
+shows a list passage before and after the v6 rendering.
+
+Pure functions: the exact text that gets embedded is unit-tested.
 """
 
-import re
-import unicodedata
 from dataclasses import dataclass, field
 from typing import Any
 
-_SPACES = re.compile(r"[ \t]{2,}")
+
+@dataclass
+class Chunk:
+    content_type: str  # "symptom" | "paragraph" | "list_item"
+    content: str
+    metadata: dict = field(default_factory=dict)
 
 
-def normalize_text(value: str) -> str:
-    """NFKC-normalize a string (turns U+00A0 and other compatibility spaces
-    into plain spaces) and collapse runs of spaces left behind."""
-    return _SPACES.sub(" ", unicodedata.normalize("NFKC", value)).strip()
+def build_chunks(content: dict, condition_name: str, processor_version: str) -> list[Chunk]:
+    """Split one processed record into retrieval passages."""
+    base = {"condition": condition_name, "processor_version": processor_version}
+    chunks: list[Chunk] = []
 
+    symptoms = content.get("symptoms")
+    if isinstance(symptoms, list) and len(symptoms) >= 2:
+        description, symptom_list = symptoms[0], symptoms[1]
+        if isinstance(symptom_list, list) and symptom_list:
+            text = f"{_label(description)} {', '.join(s.strip() for s in symptom_list if isinstance(s, str))}"
+        else:
+            text = str(description)
+        chunks.append(Chunk("symptom", text.strip(), {**base, "source": "symptoms"}))
 
-def normalize_content(value: Any) -> Any:
-    """Apply normalize_text to every string inside a JSON-like structure."""
-    if isinstance(value, str):
-        return normalize_text(value)
-    if isinstance(value, list):
-        return [normalize_content(v) for v in value]
-    if isinstance(value, dict):
-        return {k: normalize_content(v) for k, v in value.items()}
-    return value
+    section = content.get("onlineDiagnosingAndTreating", {})
+    body = section.get("content", {}) if isinstance(section, dict) else {}
+    if not isinstance(body, dict):
+        return chunks
 
+    for i, paragraph in enumerate(body.get("paragraphs", [])):
+        if isinstance(paragraph, str) and paragraph.strip():
+            chunks.append(Chunk("paragraph", paragraph.strip(), {**base, "source": "paragraph", "paragraph_index": i}))
 
-def _label(text: str) -> str:
-    """A heading that introduces what follows ends with a colon, unless it is
-    already terminated (":", or a full sentence ending in ".", "?" or "!")."""
-    text = text.strip()
-    return text if text and text[-1] in ".:?!" else f"{text}:"
+    for i, block in enumerate(body.get("lists", [])):
+        if text := render_list_block(block):
+            chunks.append(Chunk("list_item", text, {**base, "source": "list", "list_index": i}))
 
-
-def _render_items(items: list, depth: int) -> list[str]:
-    """Render processed list items as indented markdown bullets.
-
-    Items are either plain strings or `[text, [subitems...]]` pairs, nested to
-    any depth (see ProcessedDataService.process_subitems_recursively).
-    """
-    lines: list[str] = []
-    indent = "  " * depth
-    for item in items:
-        if isinstance(item, str):
-            if item.strip():
-                lines.append(f"{indent}- {item.strip()}")
-        elif isinstance(item, list) and len(item) == 2 and isinstance(item[0], str) and isinstance(item[1], list):
-            lines.append(f"{indent}- {item[0].strip()}")
-            lines.extend(_render_items(item[1], depth + 1))
-        elif isinstance(item, list):
-            lines.extend(_render_items(item, depth))
-        elif isinstance(item, dict) and isinstance(item.get("items"), list):
-            lines.extend(_render_items(item["items"], depth))
-    return lines
+    return chunks
 
 
 def render_list_block(block: Any) -> str:
     """Turn one entry of `content.lists` into readable text.
 
-    Handles every shape the processor emits:
+    Handles every shape the processor emits (see _merge_related in processing.py):
       - [heading, {"items": [...]}]
       - [heading, description, {"items": [...]}]
       - [heading, description, {subheading: {"items": [...]}, ...}]
@@ -96,48 +86,29 @@ def render_list_block(block: Any) -> str:
     return "\n".join([" ".join(prose), *bullets] if prose else bullets).strip()
 
 
-@dataclass
-class Chunk:
-    content_type: str  # "symptom" | "paragraph" | "list_item"
-    content: str
-    metadata: dict = field(default_factory=dict)
+def _label(text: str) -> str:
+    """A heading that introduces what follows ends with a colon, unless it is
+    already terminated (":", or a full sentence ending in ".", "?" or "!")."""
+    text = text.strip()
+    return text if text and text[-1] in ".:?!" else f"{text}:"
 
 
-def build_chunks(content: dict, condition_name: str, processor_version: str, content_types=None) -> list[Chunk]:
-    """Split one processed record into retrieval chunks.
+def _render_items(items: list, depth: int) -> list[str]:
+    """Processed list items as indented markdown bullets.
 
-    One chunk for the symptom list, one per paragraph and one per list,
-    following the document's own structure instead of a fixed token window.
+    Items are plain strings or [text, [subitems...]] pairs, nested to any depth.
     """
-    content_types = content_types or ["symptoms", "paragraphs", "lists"]
-    base = {"condition": condition_name, "processor_version": processor_version}
-    chunks: list[Chunk] = []
-
-    symptoms = content.get("symptoms")
-    if "symptoms" in content_types and isinstance(symptoms, list) and len(symptoms) >= 2:
-        description, symptom_list = symptoms[0], symptoms[1]
-        if isinstance(symptom_list, list) and symptom_list:
-            text = f"{_label(description)} {', '.join(s.strip() for s in symptom_list if isinstance(s, str))}"
-        else:
-            text = str(description)
-        chunks.append(Chunk("symptom", text.strip(), {**base, "source": "symptoms"}))
-
-    section = content.get("onlineDiagnosingAndTreating", {})
-    body = section.get("content", {}) if isinstance(section, dict) else {}
-    if not isinstance(body, dict):
-        return chunks
-
-    if "paragraphs" in content_types:
-        for i, paragraph in enumerate(body.get("paragraphs", [])):
-            if isinstance(paragraph, str) and paragraph.strip():
-                chunks.append(
-                    Chunk("paragraph", paragraph.strip(), {**base, "source": "paragraph", "paragraph_index": i})
-                )
-
-    if "lists" in content_types:
-        for i, block in enumerate(body.get("lists", [])):
-            text = render_list_block(block)
-            if text:
-                chunks.append(Chunk("list_item", text, {**base, "source": "list", "list_index": i}))
-
-    return chunks
+    lines: list[str] = []
+    indent = "  " * depth
+    for item in items:
+        if isinstance(item, str):
+            if item.strip():
+                lines.append(f"{indent}- {item.strip()}")
+        elif isinstance(item, list) and len(item) == 2 and isinstance(item[0], str) and isinstance(item[1], list):
+            lines.append(f"{indent}- {item[0].strip()}")
+            lines.extend(_render_items(item[1], depth + 1))
+        elif isinstance(item, list):
+            lines.extend(_render_items(item, depth))
+        elif isinstance(item, dict) and isinstance(item.get("items"), list):
+            lines.extend(_render_items(item["items"], depth))
+    return lines

@@ -1,4 +1,5 @@
-from services.chunking import build_chunks, normalize_content, normalize_text, render_list_block
+from services.chunking import build_chunks, render_list_block
+from services.processing import normalize_content, normalize_text
 
 NBSP = " "
 
@@ -69,7 +70,3 @@ def test_build_chunks_follows_document_structure():
     }
     assert chunks[3].content == "Options include:\n- A\n- B"
 
-
-def test_build_chunks_respects_content_type_filter():
-    content = {"symptoms": ["Signs:", ["Cough"]], "onlineDiagnosingAndTreating": {"content": {"paragraphs": ["P"]}}}
-    assert [c.content_type for c in build_chunks(content, "Flu", "v6", ["paragraphs"])] == ["paragraph"]

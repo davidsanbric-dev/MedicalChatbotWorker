@@ -1,4 +1,4 @@
-.PHONY: help install check-db run docker-build docker-run
+.PHONY: help install test check-db run docker-build docker-run
 
 # Load variables from .env (POSTGRES_*, DATABASE_URL, ...)
 ifneq (,$(wildcard .env))
@@ -9,6 +9,7 @@ endif
 help:
 	@echo "Available targets:"
 	@echo "  install      Install Python dependencies with uv"
+	@echo "  test         Run the unit tests (offline, no database needed)"
 	@echo "  check-db     Verify the shared Postgres (medical_conditions_api stack)"
 	@echo "               is reachable on localhost"
 	@echo "  run          Run the worker locally against the shared Postgres"
@@ -19,6 +20,9 @@ help:
 
 install:
 	uv sync
+
+test:
+	uv run pytest
 
 # Verify the shared Postgres from the medical_conditions_api stack is
 # up and reachable on localhost:$(POSTGRES_PORT).
